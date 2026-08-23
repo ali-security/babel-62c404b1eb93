@@ -1,0 +1,7 @@
+# The `node_modules` directories in these fixtures are real fixture data: they
+# model third-party packages whose input source maps must not escape their own
+# package root. The repository root .gitignore already un-ignores
+# `test/fixtures/**/node_modules`, but a `.gitignore` closer to the files wins
+# over the root one, so repeat the negation here to keep the fixtures tracked
+# even when tooling appends a broad `node_modules/` rule to the root file.
+!**/node_modules
