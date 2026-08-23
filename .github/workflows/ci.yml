@@ -1,6 +1,7 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -11,6 +12,7 @@ concurrency:
 
 jobs:
   prepare-yarn-cache:
+    timeout-minutes: 50
     name: Prepare Cache
     runs-on: ubuntu-latest
     steps:
@@ -19,7 +21,7 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
           cache: "yarn"
       - name: 'Check or update Yarn cache (fix w/ "yarn install")'
@@ -31,6 +33,7 @@ jobs:
           yarn install --mode=skip-build
 
   yarn-validate:
+    timeout-minutes: 50
     name: Validate Yarn dependencies and constraints
     needs: prepare-yarn-cache
     runs-on: ubuntu-latest
@@ -40,7 +43,7 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
           cache: "yarn"
       - name: 'Check for unmet constraints (fix w/ "yarn constraints --fix")'
@@ -60,13 +63,14 @@ jobs:
           yarn release-tool check-cycles
 
   test-esm:
+    timeout-minutes: 50
     name: Test ESM version
     needs: prepare-yarn-cache
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node-version: [latest, 24, 22]
+        node-version: [24, 22]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -87,6 +91,7 @@ jobs:
           USE_ESM: true
 
   build:
+    timeout-minutes: 50
     name: Build Babel Artifacts
     needs: prepare-yarn-cache
     runs-on: ubuntu-latest
@@ -99,7 +104,7 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
           cache: "yarn"
       - name: Build babel artifacts
@@ -109,9 +114,6 @@ jobs:
           BABEL_ENV: test-legacy
           BABEL_8_BREAKING: false
           STRIP_BABEL_8_FLAG: true
-      - name: Build Makefile.js
-        run: |
-          node ./scripts/pack-script.js
       - name: Generate readmes
         run: |
           make generate-readme
@@ -124,22 +126,29 @@ jobs:
       - name: Ensure cwd does not contain uncommitted changes
         run: |
           node ./scripts/assert-dir-git-clean.js "\`make build\` and \`node scripts/cleanup-fixtures.js\`"
+      # Pack the artifact into a single tar: the downstream collector keys
+      # uploaded files by basename and rejects duplicates (many lib/index.js).
+      # --hard-dereference is required, otherwise macOS bsdtar fails to extract
+      # with "Skipping hardlink pointing to itself".
+      - name: Archive babel artifacts
+        run: |
+          tar -cf babel-artifact.tar --hard-dereference --exclude=node_modules \
+            codemods/*/lib \
+            eslint/*/lib \
+            packages/*/lib \
+            packages/babel-standalone \
+            packages/babel-runtime \
+            packages/babel-runtime-corejs2 \
+            packages/babel-runtime-corejs3 \
+            packages/babel-core/src/vendor
       - uses: actions/upload-artifact@v4
         with:
           name: babel-artifact
-          path: |
-            codemods/*/lib/**/*
-            eslint/*/lib/**/*
-            packages/*/lib/**/*
-            packages/babel-standalone/*.js
-            packages/babel-runtime/**/*.js
-            packages/babel-runtime-corejs2/**/*.js
-            packages/babel-runtime-corejs3/**/*.js
-            packages/babel-core/src/vendor/*
-            !**/node_modules/**
+          path: babel-artifact.tar
           retention-days: 5
 
   build-windows:
+    timeout-minutes: 50
     name: Build Babel Artifacts on Windows
     runs-on: windows-latest
     # Yarn PnP does not support native ESM yet (https://github.com/yarnpkg/berry/issues/638)
@@ -151,7 +160,7 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
           cache: "yarn"
       - name: Build babel artifacts
@@ -167,6 +176,7 @@ jobs:
           node ./scripts/assert-dir-git-clean.js build
 
   lint:
+    timeout-minutes: 50
     name: Lint
     needs: build
     runs-on: ubuntu-latest
@@ -176,7 +186,7 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
           cache: "yarn"
       - name: Install
@@ -184,6 +194,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: babel-artifact
+      - name: Extract babel artifacts
+        run: tar -xf babel-artifact.tar && rm -f babel-artifact.tar
       - name: Lint
         run: make -j lint-ci check-compat-data
       - name: Ensure cwd does not contain uncommitted changes
@@ -191,6 +203,7 @@ jobs:
           node ./scripts/assert-dir-git-clean.js "lint-ci check-compat-data"
 
   test-coverage:
+    timeout-minutes: 50
     name: Test on Node.js Latest (with coverage)
     needs: build
     runs-on: ubuntu-latest
@@ -200,7 +213,7 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
           cache: "yarn"
       - name: Install
@@ -209,6 +222,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: babel-artifact
+      - name: Extract babel artifacts
+        run: tar -xf babel-artifact.tar && rm -f babel-artifact.tar
       - name: Run tests
         run: |
           yarn c8 jest --ci
@@ -223,6 +238,7 @@ jobs:
           name: babel-7
 
   test:
+    timeout-minutes: 50
     name: Test on Node.js ${{matrix.node-version}}
     needs: build
     runs-on: ubuntu-latest
@@ -230,13 +246,22 @@ jobs:
       fail-fast: false
       matrix:
         node-version: [24, 22, 20, 18, 16, 14, 12, 10, 8, 6]
+    # The node 6/8/10 legs rewrite the root `@babel/*` deps to "latest" and
+    # re-resolve them, so they must resolve against the release-era registry
+    # instead of today's npm. The modern legs keep the default registry.
+    env:
+      YARN_NPM_REGISTRY_SERVER: ${{ (matrix.node-version == '6' || matrix.node-version == '8' || matrix.node-version == '10') && 'https://time-machines-npm.sealsecurity.io/' || 'https://registry.yarnpkg.com' }}
+      YARN_NPM_AUTH_TOKEN: ${{ (matrix.node-version == '6' || matrix.node-version == '8' || matrix.node-version == '10') && '2026-01-31T17:39:22.681000Z' || '' }}
+      YARN_NPM_ALWAYS_AUTH: ${{ (matrix.node-version == '6' || matrix.node-version == '8' || matrix.node-version == '10') && 'true' || 'false' }}
+      YARN_CHECKSUM_BEHAVIOR: ${{ (matrix.node-version == '6' || matrix.node-version == '8' || matrix.node-version == '10') && 'update' || 'throw' }}
+      YARN_ENABLE_IMMUTABLE_INSTALLS: 'false'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       - name: Use Node.js latest # Run yarn on latest node
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
           cache: "yarn"
       - name: Install
@@ -244,6 +269,8 @@ jobs:
           yarn install
       - name: Downgrade Jest and Babel for node <= 10
         if: matrix.node-version == '6' || matrix.node-version == '8' || matrix.node-version == '10'
+        env:
+          BABEL_DEP_VERSION: "^7.0.0"
         run: |
           # It's a bit sarcastic that in this scenario bump-babel-dependencies.js
           # actually downgrades the root `@babel/*` deps from 8.0 alpha to 7
@@ -274,6 +301,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: babel-artifact
+      - name: Extract babel artifacts
+        run: tar -xf babel-artifact.tar && rm -f babel-artifact.tar
       - name: Use Node.js ${{ matrix.node-version }} # Checkout node version for test executor
         uses: actions/setup-node@v4
         with:
@@ -292,9 +321,10 @@ jobs:
         if: matrix.node-version == '6' || matrix.node-version == '8' || matrix.node-version == '10'
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
 
   test-windows-mac:
+    timeout-minutes: 50
     name: Test on
     needs: build
     strategy:
@@ -308,7 +338,7 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
           cache: "yarn"
       - name: Install
@@ -316,12 +346,18 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: babel-artifact
+      - name: Extract babel artifacts
+        # bash on all three runners: the default Windows shell (pwsh) rejects
+        # `rm -f` as an ambiguous -Filter/-Force abbreviation.
+        shell: bash
+        run: tar -xf babel-artifact.tar && rm -f babel-artifact.tar
       - name: Test
         run: yarn jest --ci
         env:
           BABEL_ENV: test
 
   external-parser-tests:
+    timeout-minutes: 50
     name: Third-party Parser Tests
     needs: build
     runs-on: ubuntu-latest
@@ -331,7 +367,7 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
           cache: "yarn"
       - name: Install
@@ -339,6 +375,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: babel-artifact
+      - name: Extract babel artifacts
+        run: tar -xf babel-artifact.tar && rm -f babel-artifact.tar
       - name: Download tests
         run: make -j bootstrap-flow bootstrap-typescript bootstrap-test262
       - name: Run Test262 Tests
@@ -349,6 +387,7 @@ jobs:
         run: make test-typescript
 
   runtime-interop-prepare:
+    timeout-minutes: 50
     name: Prepare runtime integration tests
     needs: build
     runs-on: ubuntu-latest
@@ -358,7 +397,7 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
           cache: "yarn"
       # See https://github.com/babel/babel/pull/12906
@@ -386,14 +425,25 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: babel-artifact
+      - name: Extract babel artifacts
+        run: tar -xf babel-artifact.tar && rm -f babel-artifact.tar
       - name: Generate absoluteRuntime tests
         run: yarn test:runtime:generate-absolute-runtime
+      - name: Use Node.js 22 for bundler tests (expected-bundler*.txt was generated on Node 22 — util.inspect symbol-key formatting and require(ESM) interop both changed after 22)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Test bundlers
         run: yarn test:runtime:bundlers
+      - name: Restore Node.js 24 (expected-cjs.txt/expected-esm.txt are in the modern format)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Test Node.js latest
         run: node test/runtime-integration/node.cjs
 
   runtime-interop:
+    timeout-minutes: 50
     name: Test @babel/runtime integrations on Node.js
     needs: [build, runtime-interop-prepare]
     runs-on: ubuntu-latest
@@ -425,7 +475,7 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
           cache: "yarn"
       # See https://github.com/babel/babel/pull/12906
@@ -453,6 +503,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: babel-artifact
+      - name: Extract babel artifacts
+        run: tar -xf babel-artifact.tar && rm -f babel-artifact.tar
       - name: Generate absoluteRuntime tests
         run: yarn test:runtime:generate-absolute-runtime
       - name: Use Node.js ${{ matrix.node-version }}
@@ -463,6 +515,7 @@ jobs:
         run: node test/runtime-integration/node.cjs
 
   eslint7-test:
+    timeout-minutes: 50
     name: Test @babel/eslint-* with ESLint 7.5.0
     needs: build
     runs-on: ubuntu-latest
@@ -472,7 +525,7 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
           cache: "yarn"
       - name: Install
@@ -480,12 +533,15 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: babel-artifact
+      - name: Extract babel artifacts
+        run: tar -xf babel-artifact.tar && rm -f babel-artifact.tar
       - name: Downgrade ESLint to 7.5.0
         run: yarn up eslint@7.5.0
       - name: Run babel/eslint tests
         run: node ./node_modules/.bin/jest eslint
 
   eslint8-test:
+    timeout-minutes: 50
     name: Test @babel/eslint-* with ESLint 8.0.0
     needs: build
     runs-on: ubuntu-latest
@@ -495,7 +551,7 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
           cache: "yarn"
       - name: Install
@@ -503,12 +559,15 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: babel-artifact
+      - name: Extract babel artifacts
+        run: tar -xf babel-artifact.tar && rm -f babel-artifact.tar
       - name: Downgrade ESLint to 8.0.0
         run: yarn up eslint@8.0.0
       - name: Run babel/eslint tests
         run: node ./node_modules/.bin/jest eslint
 
   test262-prepare:
+    timeout-minutes: 50
     name: test262 - Prepare for running in parallel
     runs-on: ubuntu-latest
     if: github.repository == 'babel/babel'
@@ -518,7 +577,7 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
       - name: Checkout test runner
         uses: actions/checkout@v4
@@ -543,6 +602,7 @@ jobs:
           retention-days: 30
 
   test262:
+    timeout-minutes: 50
     name: test262
     strategy:
       matrix:
@@ -555,13 +615,15 @@ jobs:
       - name: Use Node.js latest
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 24
           check-latest: true
       - name: Install
         run: yarn install
       - uses: actions/download-artifact@v4
         with:
           name: babel-artifact
+      - name: Extract babel artifacts
+        run: tar -xf babel-artifact.tar && rm -f babel-artifact.tar
       - name: Checkout test runner
         uses: actions/checkout@v4
         with:
@@ -600,6 +662,7 @@ jobs:
           retention-days: 30
 
   test262-finish:
+    timeout-minutes: 50
     name: test262 - Analyze results
     runs-on: ubuntu-latest
     needs: test262
@@ -651,3 +714,36 @@ jobs:
         # Specify bash to enable pipefail, so that "| tee" does not suppress the failure exit code.
         # https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsshell
         shell: bash
+
+  pack-npm-artifacts:
+    timeout-minutes: 50
+    name: Pack @babel/core npm artifact
+    needs: prepare-yarn-cache
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: "yarn"
+      - name: Install
+        run: yarn install
+      - name: Build for publish
+        run: make prepublish-build
+        env:
+          BABEL_8_BREAKING: ''
+      # Removes the lib/package.json files the build injects; leaving them in
+      # would add an extra member to the tarball and break byte parity.
+      - name: Clean module type
+        run: node ./scripts/set-module-type.js clean
+      - name: Pack
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/seal-artifacts"
+          yarn workspace @babel/core pack --out "$GITHUB_WORKSPACE/seal-artifacts/core-%v.tgz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seal-npm-artifacts
+          path: seal-artifacts/core-*.tgz
+          if-no-files-found: error

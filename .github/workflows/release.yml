@@ -1,8 +1,6 @@
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
@@ -22,6 +20,7 @@ jobs:
   log-updates:
     name: Log packages to publish
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout the new tag
         uses: actions/checkout@v4
@@ -40,6 +39,7 @@ jobs:
       contents: write # for Git to git push
     name: Create git tag and commit
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: github.event_name == 'workflow_dispatch'
     outputs:
       branch: ${{ steps.branch-name.outputs.branch }}
@@ -72,6 +72,7 @@ jobs:
   npm-release:
     name: Build, Test and Publish
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs:
       - git-version
     environment: npm
@@ -131,6 +132,7 @@ jobs:
   github-release:
     name: Create GitHub release draft
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs:
       - git-version
     # The default condition is success(), but this is false when one of the previous jobs is skipped
@@ -184,6 +186,7 @@ jobs:
       contents: write # for Git to git push
     name: Push release commit to "7.x" branch
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs:
       - npm-release
       - github-release
@@ -231,6 +234,7 @@ jobs:
   types-docs-updates:
     name: Update Babel types docs
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs:
       - github-release
       - github-push
